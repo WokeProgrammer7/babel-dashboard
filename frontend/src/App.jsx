@@ -3,7 +3,7 @@ import { Search, Plus, Moon, Sun, BookOpen, Quote, User, Lightbulb, ExternalLink
 
 // Auto-detect API URL based on environment
 const API_BASE = process.env.NODE_ENV === 'production' 
-  ? 'https://your-app-name.railway.app'  // Replace with your actual Railway URL
+  ? 'https://your-actual-render-url.onrender.com'
   : 'http://localhost:8000';
 
 const LibraryOfBabel = () => {
