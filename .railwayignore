@@ -1,0 +1,9 @@
+node_modules/
+.env
+*.db
+__pycache__/
+.git/
+.vscode/
+.DS_Store
+*.pyc
+test_*.py
