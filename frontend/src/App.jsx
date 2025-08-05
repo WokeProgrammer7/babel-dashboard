@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Search, Plus, Moon, Sun, BookOpen, Quote, User, Lightbulb, ExternalLink, X, Eye } from 'lucide-react';
+import { Search, Plus, Moon, Sun, BookOpen, Quote, User, Lightbulb, ExternalLink, X, Eye, Edit, Trash2 } from 'lucide-react';
 
 // Auto-detect API URL based on environment
 const API_BASE = process.env.NODE_ENV === 'production' 
@@ -12,6 +12,7 @@ const LibraryOfBabel = () => {
   const [selectedFilter, setSelectedFilter] = useState('all');
   const [showAddForm, setShowAddForm] = useState(false);
   const [selectedEntry, setSelectedEntry] = useState(null);
+  const [editingEntry, setEditingEntry] = useState(null);
   const [darkMode, setDarkMode] = useState(false);
   const [showStats, setShowStats] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -147,6 +148,51 @@ const LibraryOfBabel = () => {
     }
   };
 
+  const handleEditEntry = async () => {
+    if (editingEntry && editingEntry.title && editingEntry.content) {
+      try {
+        const response = await fetch(`${API_BASE}/api/entries/${editingEntry.id}`, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(editingEntry),
+        });
+
+        if (response.ok) {
+          const updatedEntry = await response.json();
+          setEntries(entries.map(entry => 
+            entry.id === updatedEntry.id ? updatedEntry : entry
+          ));
+          setEditingEntry(null);
+        } else {
+          console.error('Failed to update entry');
+        }
+      } catch (error) {
+        console.error('Error updating entry:', error);
+      }
+    }
+  };
+
+  const handleDeleteEntry = async (entryId) => {
+    if (window.confirm('Are you sure you want to delete this entry?')) {
+      try {
+        const response = await fetch(`${API_BASE}/api/entries/${entryId}`, {
+          method: 'DELETE',
+        });
+
+        if (response.ok) {
+          setEntries(entries.filter(entry => entry.id !== entryId));
+          setSelectedEntry(null);
+        } else {
+          console.error('Failed to delete entry');
+        }
+      } catch (error) {
+        console.error('Error deleting entry:', error);
+      }
+    }
+  };
+
   const themeClasses = darkMode 
     ? 'min-h-screen bg-gradient-to-br from-gray-900 via-slate-900 to-gray-800 text-gray-100'
     : 'min-h-screen bg-gradient-to-br from-stone-50 via-amber-50 to-orange-50 text-gray-900';
@@ -274,10 +320,37 @@ const LibraryOfBabel = () => {
           {filteredEntries.map(entry => (
             <div 
               key={entry.id} 
-              className={`${cardClasses} rounded-xl shadow-sm border hover:shadow-lg transition-all duration-200 cursor-pointer group`}
-              onClick={() => setSelectedEntry(entry)}
+              className={`${cardClasses} rounded-xl shadow-sm border hover:shadow-lg transition-all duration-200 group relative`}
             >
-              <div className="p-6">
+              <div className="absolute top-4 right-4 opacity-0 group-hover:opacity-100 transition-opacity flex gap-1">
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setEditingEntry({...entry});
+                  }}
+                  className={`p-2 rounded-full transition-colors ${
+                    darkMode
+                      ? 'bg-gray-700 hover:bg-gray-600 text-gray-300'
+                      : 'bg-gray-100 hover:bg-gray-200 text-gray-600'
+                  }`}
+                >
+                  <Edit className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleDeleteEntry(entry.id);
+                  }}
+                  className="p-2 rounded-full bg-red-100 hover:bg-red-200 text-red-600 transition-colors"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div 
+                className="p-6 cursor-pointer"
+                onClick={() => setSelectedEntry(entry)}
+              >
                 <div className="flex items-start justify-between mb-4">
                   <div className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium border ${getTypeColor(entry.type)}`}>
                     {getTypeIcon(entry.type)}
@@ -335,6 +408,7 @@ const LibraryOfBabel = () => {
           </div>
         )}
 
+        {/* Add Entry Modal */}
         {showAddForm && (
           <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
             <div className={`${cardClasses} rounded-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto`}>
@@ -443,6 +517,116 @@ const LibraryOfBabel = () => {
           </div>
         )}
 
+        {/* Edit Entry Modal */}
+        {editingEntry && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+            <div className={`${cardClasses} rounded-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto`}>
+              <div className="p-6">
+                <div className="flex items-center justify-between mb-6">
+                  <h2 className={`text-xl font-semibold ${darkMode ? 'text-gray-100' : 'text-gray-900'}`}>
+                    Edit Entry
+                  </h2>
+                  <button
+                    onClick={() => setEditingEntry(null)}
+                    className={`${darkMode ? 'text-gray-400 hover:text-gray-300' : 'text-gray-400 hover:text-gray-600'}`}
+                  >
+                    <X className="w-6 h-6" />
+                  </button>
+                </div>
+                
+                <div className="space-y-4">
+                  <div>
+                    <label className={`block text-sm font-medium mb-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+                      Type
+                    </label>
+                    <select
+                      className={`w-full p-3 ${inputClasses} rounded-lg`}
+                      value={editingEntry.type}
+                      onChange={(e) => setEditingEntry({ ...editingEntry, type: e.target.value })}
+                    >
+                      <option value="word">Word</option>
+                      <option value="phrase">Phrase</option>
+                      <option value="author">Author</option>
+                      <option value="concept">Concept</option>
+                      <option value="excerpt">Excerpt</option>
+                    </select>
+                  </div>
+                  
+                  <div>
+                    <label className={`block text-sm font-medium mb-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+                      Title *
+                    </label>
+                    <input
+                      type="text"
+                      className={`w-full p-3 ${inputClasses} rounded-lg`}
+                      value={editingEntry.title}
+                      onChange={(e) => setEditingEntry({ ...editingEntry, title: e.target.value })}
+                      placeholder="Enter the word, phrase, or title..."
+                    />
+                  </div>
+                  
+                  <div>
+                    <label className={`block text-sm font-medium mb-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+                      Content *
+                    </label>
+                    <textarea
+                      className={`w-full p-3 ${inputClasses} rounded-lg h-24`}
+                      value={editingEntry.content}
+                      onChange={(e) => setEditingEntry({ ...editingEntry, content: e.target.value })}
+                      placeholder="Definition, description, or excerpt..."
+                    />
+                  </div>
+                  
+                  <div>
+                    <label className={`block text-sm font-medium mb-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+                      Source/Trigger
+                    </label>
+                    <input
+                      type="text"
+                      className={`w-full p-3 ${inputClasses} rounded-lg`}
+                      value={editingEntry.source}
+                      onChange={(e) => setEditingEntry({ ...editingEntry, source: e.target.value })}
+                      placeholder="Where did you encounter this?"
+                    />
+                  </div>
+                  
+                  <div>
+                    <label className={`block text-sm font-medium mb-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+                      Why It Stuck
+                    </label>
+                    <textarea
+                      className={`w-full p-3 ${inputClasses} rounded-lg h-20`}
+                      value={editingEntry.whyItStuck}
+                      onChange={(e) => setEditingEntry({ ...editingEntry, whyItStuck: e.target.value })}
+                      placeholder="What resonated about this?"
+                    />
+                  </div>
+                </div>
+                
+                <div className="flex gap-3 mt-6">
+                  <button
+                    onClick={handleEditEntry}
+                    className="flex-1 bg-amber-600 text-white py-3 rounded-lg hover:bg-amber-700 transition-colors font-medium"
+                  >
+                    Update Entry
+                  </button>
+                  <button
+                    onClick={() => setEditingEntry(null)}
+                    className={`px-6 py-3 rounded-lg transition-colors ${
+                      darkMode
+                        ? 'border border-gray-600 hover:bg-gray-700 text-gray-300'
+                        : 'border border-gray-300 hover:bg-gray-50 text-gray-700'
+                    }`}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* View Entry Modal */}
         {selectedEntry && (
           <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
             <div className={`${cardClasses} rounded-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto`}>
