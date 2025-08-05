@@ -3,7 +3,7 @@ import { Search, Plus, Moon, Sun, BookOpen, Quote, User, Lightbulb, ExternalLink
 
 // Auto-detect API URL based on environment
 const API_BASE = process.env.NODE_ENV === 'production' 
-  ? 'https://your-actual-render-url.onrender.com'
+  ? 'https://babel-dashboard.onrender.com'  // Your live Render URL
   : 'http://localhost:8000';
 
 const LibraryOfBabel = () => {
