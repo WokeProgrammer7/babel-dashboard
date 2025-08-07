@@ -4,6 +4,8 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import sqlite3
+import psycopg2
+import psycopg2.extras
 import json
 import os
 import csv
@@ -11,6 +13,7 @@ import io
 from datetime import datetime, date
 import re
 import tempfile
+from urllib.parse import urlparse
 
 app = FastAPI(title="Library of Babel API - Enhanced", version="2.0.0")
 
@@ -22,6 +25,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Database configuration
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
 # Pydantic models
 class Entry(BaseModel):
@@ -65,13 +71,65 @@ class AdvancedSearchParams(BaseModel):
 
 # Database functions
 def get_db_connection():
-    conn = sqlite3.connect('babel.db')
-    conn.row_factory = sqlite3.Row
-    return conn
+    """Get database connection - PostgreSQL if DATABASE_URL exists, otherwise SQLite"""
+    if DATABASE_URL:
+        # Parse the database URL
+        url = urlparse(DATABASE_URL)
+        
+        # Connect to PostgreSQL
+        conn = psycopg2.connect(
+            host=url.hostname,
+            port=url.port,
+            user=url.username,
+            password=url.password,
+            database=url.path[1:]  # Remove leading slash
+        )
+        
+        # Use RealDictCursor for dict-like access to rows
+        conn.cursor_factory = psycopg2.extras.RealDictCursor
+        return conn
+    else:
+        # Fall back to SQLite for local development
+        conn = sqlite3.connect('babel.db')
+        conn.row_factory = sqlite3.Row
+        return conn
 
 def init_db():
+    """Initialize database tables"""
     conn = get_db_connection()
-    conn.execute('''
+    cursor = conn.cursor()
+    
+    if DATABASE_URL:
+        # PostgreSQL SQL
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS entries (
+            id SERIAL PRIMARY KEY,
+            type TEXT NOT NULL,
+            title TEXT NOT NULL,
+            content TEXT NOT NULL,
+            source TEXT,
+            whyItStuck TEXT,
+            extendedNote TEXT,
+            category TEXT,
+            tags TEXT,
+            batch TEXT,
+            dateAdded TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS analytics (
+            id SERIAL PRIMARY KEY,
+            event_type TEXT NOT NULL,
+            event_data TEXT,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+    else:
+        # SQLite SQL (original)
+        cursor.execute('''
         CREATE TABLE IF NOT EXISTS entries (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             type TEXT NOT NULL,
@@ -87,19 +145,19 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
-    ''')
-    
-    # Add analytics table for tracking
-    conn.execute('''
+        ''')
+        
+        cursor.execute('''
         CREATE TABLE IF NOT EXISTS analytics (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             event_type TEXT NOT NULL,
             event_data TEXT,
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
-    ''')
+        ''')
     
     conn.commit()
+    cursor.close()
     conn.close()
 
 # Smart Entry Parser using simple NLP techniques
@@ -123,11 +181,10 @@ class SmartEntryParser:
             'Translation Philosophy': ['translation', 'translate', 'language'],
             'Material Metaphor': ['metaphor', 'symbolism', 'represents']
         }
-    
+
     def parse_unstructured_text(self, text: str) -> List[Dict[str, Any]]:
         """Parse unstructured text into potential entries"""
         entries = []
-        
         # Split text into potential entries (by double newlines, bullets, or numbers)
         segments = re.split(r'\n\s*\n|^\d+\.|^[-•*]\s+', text, flags=re.MULTILINE)
         segments = [s.strip() for s in segments if s.strip()]
@@ -135,13 +192,13 @@ class SmartEntryParser:
         for segment in segments:
             if len(segment) < 20:  # Skip very short segments
                 continue
-                
+            
             entry = self.extract_entry_from_segment(segment)
             if entry:
                 entries.append(entry)
         
         return entries
-    
+
     def extract_entry_from_segment(self, segment: str) -> Optional[Dict[str, Any]]:
         """Extract a structured entry from a text segment"""
         lines = [line.strip() for line in segment.split('\n') if line.strip()]
@@ -170,7 +227,7 @@ class SmartEntryParser:
         }
         
         return entry
-    
+
     def extract_title(self, lines: List[str]) -> str:
         """Extract title from lines"""
         first_line = lines[0]
@@ -196,7 +253,7 @@ class SmartEntryParser:
         
         # Fallback: first 50 characters
         return first_line[:50].strip()
-    
+
     def extract_content(self, lines: List[str], title: str) -> str:
         """Extract main content, excluding title"""
         content_lines = []
@@ -217,7 +274,7 @@ class SmartEntryParser:
             content_lines = lines[1:]
         
         return ' '.join(content_lines).strip()
-    
+
     def determine_type(self, text: str) -> str:
         """Determine entry type based on content"""
         text_lower = text.lower()
@@ -242,7 +299,7 @@ class SmartEntryParser:
         if type_scores:
             return max(type_scores, key=type_scores.get)
         return 'concept'
-    
+
     def determine_category(self, text: str) -> str:
         """Determine category based on content"""
         text_lower = text.lower()
@@ -258,7 +315,7 @@ class SmartEntryParser:
                 return max(category_scores, key=category_scores.get)
         
         return 'General'
-    
+
     def extract_source(self, text: str) -> str:
         """Extract source information"""
         # Look for common source patterns
@@ -267,7 +324,7 @@ class SmartEntryParser:
             r'from[:\s]+([^\n]+)',
             r'via[:\s]+([^\n]+)',
             r'—([^—\n]+)$',  # Em dash at end
-            r'\(([^)]+)\)$'   # Parentheses at end
+            r'\(([^)]+)\)$'  # Parentheses at end
         ]
         
         for pattern in source_patterns:
@@ -293,14 +350,17 @@ async def root():
 @app.get("/api/entries", response_model=List[Entry])
 async def get_entries():
     conn = get_db_connection()
-    entries = conn.execute('''
-        SELECT id, type, title, content, source, whyItStuck, 
-               extendedNote, category, tags, batch, dateAdded
-        FROM entries 
-        ORDER BY created_at DESC
-    ''').fetchall()
+    cursor = conn.cursor()
+    cursor.execute('''
+    SELECT id, type, title, content, source, whyItStuck,
+           extendedNote, category, tags, batch, dateAdded
+    FROM entries
+    ORDER BY created_at DESC
+    ''')
+    entries = cursor.fetchall()
+    cursor.close()
     conn.close()
-    
+
     result = []
     for entry in entries:
         result.append(Entry(
@@ -323,47 +383,69 @@ async def get_entries():
 async def search_entries(q: str = "", type_filter: str = "all"):
     """Basic search endpoint for frontend compatibility"""
     conn = get_db_connection()
+    cursor = conn.cursor()
     
     # Build query based on parameters
     if q and type_filter != "all":
         # Search with both text and type filter
-        entries = conn.execute('''
-            SELECT id, type, title, content, source, whyItStuck, 
-                   extendedNote, category, tags, batch, dateAdded
-            FROM entries 
-            WHERE (title LIKE ? OR content LIKE ? OR source LIKE ?) 
-            AND type = ?
-            ORDER BY created_at DESC
-        ''', (f"%{q}%", f"%{q}%", f"%{q}%", type_filter)).fetchall()
+        cursor.execute('''
+        SELECT id, type, title, content, source, whyItStuck,
+               extendedNote, category, tags, batch, dateAdded
+        FROM entries
+        WHERE (title LIKE %s OR content LIKE %s OR source LIKE %s)
+        AND type = %s
+        ORDER BY created_at DESC
+        ''' if DATABASE_URL else '''
+        SELECT id, type, title, content, source, whyItStuck,
+               extendedNote, category, tags, batch, dateAdded
+        FROM entries
+        WHERE (title LIKE ? OR content LIKE ? OR source LIKE ?)
+        AND type = ?
+        ORDER BY created_at DESC
+        ''', (f"%{q}%", f"%{q}%", f"%{q}%", type_filter))
     elif q:
         # Search with text only
-        entries = conn.execute('''
-            SELECT id, type, title, content, source, whyItStuck, 
-                   extendedNote, category, tags, batch, dateAdded
-            FROM entries 
-            WHERE title LIKE ? OR content LIKE ? OR source LIKE ?
-            ORDER BY created_at DESC
-        ''', (f"%{q}%", f"%{q}%", f"%{q}%")).fetchall()
+        cursor.execute('''
+        SELECT id, type, title, content, source, whyItStuck,
+               extendedNote, category, tags, batch, dateAdded
+        FROM entries
+        WHERE title LIKE %s OR content LIKE %s OR source LIKE %s
+        ORDER BY created_at DESC
+        ''' if DATABASE_URL else '''
+        SELECT id, type, title, content, source, whyItStuck,
+               extendedNote, category, tags, batch, dateAdded
+        FROM entries
+        WHERE title LIKE ? OR content LIKE ? OR source LIKE ?
+        ORDER BY created_at DESC
+        ''', (f"%{q}%", f"%{q}%", f"%{q}%"))
     elif type_filter != "all":
         # Filter by type only
-        entries = conn.execute('''
-            SELECT id, type, title, content, source, whyItStuck, 
-                   extendedNote, category, tags, batch, dateAdded
-            FROM entries 
-            WHERE type = ?
-            ORDER BY created_at DESC
-        ''', (type_filter,)).fetchall()
+        cursor.execute('''
+        SELECT id, type, title, content, source, whyItStuck,
+               extendedNote, category, tags, batch, dateAdded
+        FROM entries
+        WHERE type = %s
+        ORDER BY created_at DESC
+        ''' if DATABASE_URL else '''
+        SELECT id, type, title, content, source, whyItStuck,
+               extendedNote, category, tags, batch, dateAdded
+        FROM entries
+        WHERE type = ?
+        ORDER BY created_at DESC
+        ''', (type_filter,))
     else:
         # No filters, return all
-        entries = conn.execute('''
-            SELECT id, type, title, content, source, whyItStuck, 
-                   extendedNote, category, tags, batch, dateAdded
-            FROM entries 
-            ORDER BY created_at DESC
-        ''').fetchall()
-    
+        cursor.execute('''
+        SELECT id, type, title, content, source, whyItStuck,
+               extendedNote, category, tags, batch, dateAdded
+        FROM entries
+        ORDER BY created_at DESC
+        ''')
+
+    entries = cursor.fetchall()
+    cursor.close()
     conn.close()
-    
+
     # Format results
     result = []
     for entry in entries:
@@ -389,18 +471,35 @@ async def create_entry(entry: EntryCreate):
     
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO entries (type, title, content, source, whyItStuck, 
+    
+    if DATABASE_URL:
+        # PostgreSQL
+        cursor.execute('''
+        INSERT INTO entries (type, title, content, source, whyItStuck,
+                           extendedNote, category, tags, batch, dateAdded)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
+        ''', (
+            entry.type, entry.title, entry.content, entry.source,
+            entry.whyItStuck, entry.extendedNote, entry.category,
+            json.dumps(entry.tags), entry.batch, entry.dateAdded
+        ))
+        entry_id = cursor.fetchone()[0]
+    else:
+        # SQLite
+        cursor.execute('''
+        INSERT INTO entries (type, title, content, source, whyItStuck,
                            extendedNote, category, tags, batch, dateAdded)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (
-        entry.type, entry.title, entry.content, entry.source,
-        entry.whyItStuck, entry.extendedNote, entry.category,
-        json.dumps(entry.tags), entry.batch, entry.dateAdded
-    ))
+        ''', (
+            entry.type, entry.title, entry.content, entry.source,
+            entry.whyItStuck, entry.extendedNote, entry.category,
+            json.dumps(entry.tags), entry.batch, entry.dateAdded
+        ))
+        entry_id = cursor.lastrowid
     
-    entry_id = cursor.lastrowid
     conn.commit()
+    cursor.close()
     conn.close()
     
     return Entry(
@@ -418,11 +517,9 @@ async def create_entry(entry: EntryCreate):
     )
 
 # ENHANCED FEATURES
-
 @app.post("/api/entries/smart-create")
 async def smart_create_entries(file: UploadFile = File(...)):
     """Upload unstructured notes and get AI-suggested entries"""
-    
     if not file.filename.endswith(('.txt', '.md')):
         raise HTTPException(status_code=400, detail="Please upload a .txt or .md file")
     
@@ -435,11 +532,21 @@ async def smart_create_entries(file: UploadFile = File(...)):
     
     # Log analytics
     conn = get_db_connection()
-    conn.execute(
-        "INSERT INTO analytics (event_type, event_data) VALUES (?, ?)",
-        ("smart_upload", json.dumps({"filename": file.filename, "entries_found": len(suggested_entries)}))
-    )
+    cursor = conn.cursor()
+    
+    if DATABASE_URL:
+        cursor.execute(
+            "INSERT INTO analytics (event_type, event_data) VALUES (%s, %s)",
+            ("smart_upload", json.dumps({"filename": file.filename, "entries_found": len(suggested_entries)}))
+        )
+    else:
+        cursor.execute(
+            "INSERT INTO analytics (event_type, event_data) VALUES (?, ?)",
+            ("smart_upload", json.dumps({"filename": file.filename, "entries_found": len(suggested_entries)}))
+        )
+    
     conn.commit()
+    cursor.close()
     conn.close()
     
     return SmartEntryResponse(
@@ -451,53 +558,63 @@ async def smart_create_entries(file: UploadFile = File(...)):
 @app.post("/api/entries/advanced-search")
 async def advanced_search(params: AdvancedSearchParams):
     """Advanced search with multiple filters"""
-    
     conn = get_db_connection()
+    cursor = conn.cursor()
     
     # Build dynamic query
     query = """
-        SELECT id, type, title, content, source, whyItStuck, 
-               extendedNote, category, tags, batch, dateAdded
-        FROM entries 
-        WHERE 1=1
+    SELECT id, type, title, content, source, whyItStuck,
+           extendedNote, category, tags, batch, dateAdded
+    FROM entries
+    WHERE 1=1
     """
     query_params = []
     
     # Text search
     if params.query:
-        query += " AND (title LIKE ? OR content LIKE ? OR source LIKE ? OR category LIKE ?)"
+        if DATABASE_URL:
+            query += " AND (title LIKE %s OR content LIKE %s OR source LIKE %s OR category LIKE %s)"
+        else:
+            query += " AND (title LIKE ? OR content LIKE ? OR source LIKE ? OR category LIKE ?)"
         search_term = f"%{params.query}%"
         query_params.extend([search_term, search_term, search_term, search_term])
     
     # Type filter
     if params.types:
-        placeholders = ','.join(['?' for _ in params.types])
+        if DATABASE_URL:
+            placeholders = ','.join(['%s' for _ in params.types])
+        else:
+            placeholders = ','.join(['?' for _ in params.types])
         query += f" AND type IN ({placeholders})"
         query_params.extend(params.types)
     
-    # Category filter  
+    # Category filter
     if params.categories:
-        placeholders = ','.join(['?' for _ in params.categories])
+        if DATABASE_URL:
+            placeholders = ','.join(['%s' for _ in params.categories])
+        else:
+            placeholders = ','.join(['?' for _ in params.categories])
         query += f" AND category IN ({placeholders})"
         query_params.extend(params.categories)
     
     # Date range
     if params.date_from:
-        query += " AND dateAdded >= ?"
+        query += " AND dateAdded >= %s" if DATABASE_URL else " AND dateAdded >= ?"
         query_params.append(params.date_from)
-    
     if params.date_to:
-        query += " AND dateAdded <= ?"
+        query += " AND dateAdded <= %s" if DATABASE_URL else " AND dateAdded <= ?"
         query_params.append(params.date_to)
     
     # Batch filter
     if params.batch:
-        query += " AND batch LIKE ?"
+        query += " AND batch LIKE %s" if DATABASE_URL else " AND batch LIKE ?"
         query_params.append(f"%{params.batch}%")
     
     query += " ORDER BY created_at DESC"
     
-    entries = conn.execute(query, query_params).fetchall()
+    cursor.execute(query, query_params)
+    entries = cursor.fetchall()
+    cursor.close()
     conn.close()
     
     # Format results
@@ -529,15 +646,15 @@ async def advanced_search(params: AdvancedSearchParams):
 @app.get("/api/export/{format}")
 async def export_entries(format: str):
     """Export entries in various formats"""
-    
     if format not in ['json', 'csv', 'markdown']:
         raise HTTPException(status_code=400, detail="Format must be json, csv, or markdown")
     
     # Get all entries
     conn = get_db_connection()
-    entries = conn.execute('''
-        SELECT * FROM entries ORDER BY created_at DESC
-    ''').fetchall()
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM entries ORDER BY created_at DESC')
+    entries = cursor.fetchall()
+    cursor.close()
     conn.close()
     
     if format == 'json':
@@ -565,15 +682,15 @@ async def export_entries(format: str):
             media_type="application/json",
             headers={"Content-Disposition": "attachment; filename=babel_library.json"}
         )
-    
+        
     elif format == 'csv':
         # Export as CSV
         output = io.StringIO()
         writer = csv.writer(output)
         
         # Write header
-        writer.writerow(['ID', 'Type', 'Title', 'Content', 'Source', 'Why It Stuck', 
-                        'Extended Note', 'Category', 'Tags', 'Batch', 'Date Added'])
+        writer.writerow(['ID', 'Type', 'Title', 'Content', 'Source', 'Why It Stuck',
+                         'Extended Note', 'Category', 'Tags', 'Batch', 'Date Added'])
         
         # Write data
         for entry in entries:
@@ -590,7 +707,7 @@ async def export_entries(format: str):
             media_type="text/csv",
             headers={"Content-Disposition": "attachment; filename=babel_library.csv"}
         )
-    
+        
     elif format == 'markdown':
         # Export as Markdown
         md_content = "# Library of Babel Export\n\n"
@@ -610,13 +727,10 @@ async def export_entries(format: str):
             
             if entry['source']:
                 md_content += f"**Source:** {entry['source']}\n\n"
-            
             if entry['whyItStuck']:
                 md_content += f"**Why it stuck:** {entry['whyItStuck']}\n\n"
-            
             if entry['extendedNote']:
                 md_content += f"**Extended note:** {entry['extendedNote']}\n\n"
-            
             if entry['category']:
                 md_content += f"**Category:** {entry['category']}\n\n"
             
@@ -636,43 +750,62 @@ async def export_entries(format: str):
 @app.get("/api/analytics/summary")
 async def get_analytics_summary():
     """Get analytics and insights about the collection"""
-    
     conn = get_db_connection()
+    cursor = conn.cursor()
     
     # Basic stats
-    total_entries = conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM entries")
+    total_entries = cursor.fetchone()[0]
     
     # Type breakdown
-    type_stats = conn.execute("""
-        SELECT type, COUNT(*) as count 
-        FROM entries 
-        GROUP BY type 
-        ORDER BY count DESC
-    """).fetchall()
+    cursor.execute("""
+    SELECT type, COUNT(*) as count
+    FROM entries
+    GROUP BY type
+    ORDER BY count DESC
+    """)
+    type_stats = cursor.fetchall()
     
     # Category breakdown
-    category_stats = conn.execute("""
-        SELECT category, COUNT(*) as count 
-        FROM entries 
-        WHERE category != '' 
-        GROUP BY category 
-        ORDER BY count DESC
-        LIMIT 10
-    """).fetchall()
+    cursor.execute("""
+    SELECT category, COUNT(*) as count
+    FROM entries
+    WHERE category != ''
+    GROUP BY category
+    ORDER BY count DESC
+    LIMIT 10
+    """)
+    category_stats = cursor.fetchall()
     
     # Recent activity (entries per month)
-    activity_stats = conn.execute("""
-        SELECT 
+    if DATABASE_URL:
+        cursor.execute("""
+        SELECT
+            to_char(to_date(dateAdded, 'YYYY-MM-DD'), 'YYYY-MM') as month,
+            COUNT(*) as count
+        FROM entries
+        GROUP BY to_char(to_date(dateAdded, 'YYYY-MM-DD'), 'YYYY-MM')
+        ORDER BY month DESC
+        LIMIT 12
+        """)
+    else:
+        cursor.execute("""
+        SELECT
             strftime('%Y-%m', dateAdded) as month,
             COUNT(*) as count
-        FROM entries 
+        FROM entries
         GROUP BY strftime('%Y-%m', dateAdded)
         ORDER BY month DESC
         LIMIT 12
-    """).fetchall()
+        """)
+    activity_stats = cursor.fetchall()
     
     # Tag frequency
-    all_entries = conn.execute("SELECT tags FROM entries WHERE tags != ''").fetchall()
+    cursor.execute("SELECT tags FROM entries WHERE tags != ''")
+    all_entries = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    
     tag_frequency = {}
     for entry in all_entries:
         tags = json.loads(entry['tags'])
@@ -681,8 +814,6 @@ async def get_analytics_summary():
     
     # Sort tags by frequency
     top_tags = sorted(tag_frequency.items(), key=lambda x: x[1], reverse=True)[:20]
-    
-    conn.close()
     
     return {
         "total_entries": total_entries,
@@ -698,13 +829,19 @@ async def delete_entry(entry_id: int):
     """Delete an entry"""
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM entries WHERE id = ?", (entry_id,))
+    
+    if DATABASE_URL:
+        cursor.execute("DELETE FROM entries WHERE id = %s", (entry_id,))
+    else:
+        cursor.execute("DELETE FROM entries WHERE id = ?", (entry_id,))
     
     if cursor.rowcount == 0:
+        cursor.close()
         conn.close()
         raise HTTPException(status_code=404, detail="Entry not found")
     
     conn.commit()
+    cursor.close()
     conn.close()
     return {"message": "Entry deleted successfully"}
 
@@ -714,23 +851,38 @@ async def update_entry(entry_id: int, entry: EntryCreate):
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    cursor.execute('''
-        UPDATE entries 
-        SET type=?, title=?, content=?, source=?, whyItStuck=?, 
+    if DATABASE_URL:
+        cursor.execute('''
+        UPDATE entries
+        SET type=%s, title=%s, content=%s, source=%s, whyItStuck=%s,
+            extendedNote=%s, category=%s, tags=%s, batch=%s, dateAdded=%s,
+            updated_at=CURRENT_TIMESTAMP
+        WHERE id=%s
+        ''', (
+            entry.type, entry.title, entry.content, entry.source,
+            entry.whyItStuck, entry.extendedNote, entry.category,
+            json.dumps(entry.tags), entry.batch, entry.dateAdded, entry_id
+        ))
+    else:
+        cursor.execute('''
+        UPDATE entries
+        SET type=?, title=?, content=?, source=?, whyItStuck=?,
             extendedNote=?, category=?, tags=?, batch=?, dateAdded=?,
             updated_at=CURRENT_TIMESTAMP
         WHERE id=?
-    ''', (
-        entry.type, entry.title, entry.content, entry.source,
-        entry.whyItStuck, entry.extendedNote, entry.category,
-        json.dumps(entry.tags), entry.batch, entry.dateAdded, entry_id
-    ))
+        ''', (
+            entry.type, entry.title, entry.content, entry.source,
+            entry.whyItStuck, entry.extendedNote, entry.category,
+            json.dumps(entry.tags), entry.batch, entry.dateAdded, entry_id
+        ))
     
     if cursor.rowcount == 0:
+        cursor.close()
         conn.close()
         raise HTTPException(status_code=404, detail="Entry not found")
     
     conn.commit()
+    cursor.close()
     conn.close()
     
     return Entry(
