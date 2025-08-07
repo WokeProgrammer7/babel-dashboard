@@ -311,6 +311,13 @@ smart_parser = SmartEntryParser()
 @app.on_event("startup")
 async def startup_event():
     init_db()
+    db_url = get_database_url()
+    if is_postgresql():
+        if db_url.startswith('postgres://'):
+            db_url = db_url.replace('postgres://', 'postgresql://', 1)
+        print(f"Using PostgreSQL at {db_url}")
+    else:
+        print(f"Using SQLite fallback at {db_url}")
 
 @app.get("/")
 async def root():
