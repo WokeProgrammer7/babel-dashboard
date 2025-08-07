@@ -75,8 +75,13 @@ class AdvancedSearchParams(BaseModel):
 
 # Database connection logic
 def get_database_url():
-    """Get database URL from environment, fallback to SQLite"""
-    return os.getenv('DATABASE_URL', 'sqlite:///babel.db')
+    """Get database URL from environment or raise an error if missing"""
+    db_url = os.getenv('DATABASE_URL')
+    if not db_url:
+        msg = "DATABASE_URL is not set; the service cannot start without a valid DATABASE_URL"
+        print(msg)
+        raise RuntimeError(msg)
+    return db_url
 
 def is_postgresql():
     """Check if we're using PostgreSQL and it's available"""
@@ -86,26 +91,31 @@ def is_postgresql():
 def get_db_connection():
     """Get database connection - PostgreSQL or SQLite"""
     db_url = get_database_url()
-    
+
     if is_postgresql():
+        print("Using PostgreSQL database")
         try:
             # Fix for Render's PostgreSQL URL format
             if db_url.startswith('postgres://'):
                 db_url = db_url.replace('postgres://', 'postgresql://', 1)
-            
+
             conn = psycopg2.connect(db_url, cursor_factory=RealDictCursor)
             return conn
         except Exception as e:
-            print(f"PostgreSQL connection failed: {e}")
-            # Fallback to SQLite
-            conn = sqlite3.connect('babel.db')
+            msg = f"PostgreSQL connection failed: {e}"
+            print(msg)
+            raise RuntimeError(msg)
+    else:
+        parsed = urlparse(db_url)
+        if parsed.scheme == 'sqlite':
+            print("Using SQLite database")
+            db_path = parsed.path.lstrip('/') or 'babel.db'
+            conn = sqlite3.connect(db_path)
             conn.row_factory = sqlite3.Row
             return conn
-    else:
-        # SQLite connection
-        conn = sqlite3.connect('babel.db')
-        conn.row_factory = sqlite3.Row
-        return conn
+        msg = f"Unsupported DATABASE_URL scheme: {db_url}"
+        print(msg)
+        raise RuntimeError(msg)
 
 def init_db():
     """Initialize database tables"""
